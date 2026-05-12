@@ -64,7 +64,10 @@
 /* Newline character(s) */
 #define EOL "\n"
 
-typedef unsigned char bool;
+#if __STDC_VERSION__ < 202311L
+  typedef unsigned char bool;
+#endif /* __STDC_VERSION__ < 202311L */
+
 #define true          1
 #define false         0
 
