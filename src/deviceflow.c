@@ -194,7 +194,15 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 
         char * usercode = getValueForKey(chunk.memory, "user_code");
         char * devicecode = getValueForKey(chunk.memory, "device_code");
-	char * activateUrl = getValueForKey(chunk.memory, "verification_uri_complete");
+        char * activateUrl = getValueForKey(chunk.memory, "verification_uri_complete");
+        if (usercode == NULL || devicecode == NULL || activateUrl == NULL) {
+                free(usercode);
+                free(devicecode);
+                free(activateUrl);
+                if (curl) curl_easy_cleanup(curl);
+                curl_global_cleanup();
+                return PAM_AUTH_ERR;
+        }
         printf("auth: %s %s\n", usercode, devicecode);
         free(usercode);
 

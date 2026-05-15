@@ -681,6 +681,8 @@ QRecLevel get_qr_ec_level(const char ec_level)
 
 char * getQR(const char * str)
 {
+    if (str == NULL) return NULL;
+
     int ret = 0;
     int c = 0;
 
