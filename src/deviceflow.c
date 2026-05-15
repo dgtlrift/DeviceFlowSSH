@@ -26,6 +26,7 @@ under the License.
 #include <string.h>
 #include <unistd.h>
 
+#include <sys/stat.h>
 #include <syslog.h>
 
 #include <curl/curl.h>
@@ -36,9 +37,87 @@ under the License.
 /* needed for base64 decoder */
 #include <openssl/pem.h>
 
-#define DEVICE_AUTHORIZE_URL  "https://dev-57525606.okta.com/oauth2/v1/device/authorize"
-#define TOKEN_URL "https://dev-57525606.okta.com/oauth2/v1/token"
-#define CLIENT_ID "0oa15wulqt5yqD9FP5d7"
+#define CONFIG_FILE "/etc/security/pam_authSSHviaOKTA.conf"
+
+typedef struct {
+    char *device_authorize_url;
+    char *token_url;
+    char *client_id;
+} OktaConfig;
+
+static void freeConfig(OktaConfig *cfg) {
+    free(cfg->device_authorize_url);
+    free(cfg->token_url);
+    free(cfg->client_id);
+    cfg->device_authorize_url = NULL;
+    cfg->token_url = NULL;
+    cfg->client_id = NULL;
+}
+
+static int loadConfig(pam_handle_t *pamh, OktaConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+
+    struct stat st;
+    if (stat(CONFIG_FILE, &st) != 0) {
+        pam_syslog(pamh, LOG_ERR, "cannot stat config file %s", CONFIG_FILE);
+        return -1;
+    }
+    if (st.st_uid != 0) {
+        pam_syslog(pamh, LOG_ERR, "config file %s is not owned by root — refusing to load", CONFIG_FILE);
+        return -1;
+    }
+    if (st.st_mode & (S_IWGRP | S_IROTH | S_IWOTH)) {
+        pam_syslog(pamh, LOG_ERR, "config file %s has unsafe permissions — refusing to load", CONFIG_FILE);
+        return -1;
+    }
+
+    FILE *f = fopen(CONFIG_FILE, "r");
+    if (f == NULL) {
+        pam_syslog(pamh, LOG_ERR, "cannot open config file %s", CONFIG_FILE);
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\0') continue;
+
+        char *eq = strchr(p, '=');
+        if (eq == NULL) continue;
+        *eq = '\0';
+
+        char *key = p;
+        char *val = eq + 1;
+
+        /* strip trailing whitespace from key */
+        char *k = key + strlen(key) - 1;
+        while (k >= key && (*k == ' ' || *k == '\t')) *k-- = '\0';
+
+        /* strip leading and trailing whitespace from value */
+        while (*val == ' ' || *val == '\t') val++;
+        char *v = val + strlen(val) - 1;
+        while (v >= val && (*v == ' ' || *v == '\t')) *v-- = '\0';
+
+        if (strcmp(key, "device_authorize_url") == 0)
+            cfg->device_authorize_url = strdup(val);
+        else if (strcmp(key, "token_url") == 0)
+            cfg->token_url = strdup(val);
+        else if (strcmp(key, "client_id") == 0)
+            cfg->client_id = strdup(val);
+    }
+    fclose(f);
+
+    int ok = 1;
+    if (!cfg->device_authorize_url) { pam_syslog(pamh, LOG_ERR, "config missing: device_authorize_url"); ok = 0; }
+    if (!cfg->token_url)            { pam_syslog(pamh, LOG_ERR, "config missing: token_url");            ok = 0; }
+    if (!cfg->client_id)            { pam_syslog(pamh, LOG_ERR, "config missing: client_id");            ok = 0; }
+    if (!ok) { freeConfig(cfg); return -1; }
+
+    return 0;
+}
 
 /* structure used for curl return */
 struct MemoryStruct {
@@ -182,6 +261,11 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 
         fprintf(stderr, "starting\n");
 
+        OktaConfig cfg;
+        if (loadConfig(pamh, &cfg) != 0) {
+                return PAM_AUTH_ERR;
+        }
+
         /* memory for curl return */
         chunk.memory = malloc(1);  /* will be grown as needed by the realloc above */
         chunk.size = 0;    /* no data at this point */
@@ -191,8 +275,8 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
         curl = curl_easy_init();
 
         /* call authorize end point */
-	sprintf(postData, "client_id=%s&scope=openid profile offline_access", CLIENT_ID);
-        issuePost(DEVICE_AUTHORIZE_URL, postData);
+	sprintf(postData, "client_id=%s&scope=openid profile offline_access", cfg.client_id);
+        issuePost(cfg.device_authorize_url, postData);
 
         pam_syslog(pamh, LOG_DEBUG, "authorize response (%zu bytes): %s",
                    chunk.size, chunk.memory ? chunk.memory : "(null)");
@@ -214,6 +298,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
                 free(usercode);
                 free(devicecode);
                 free(activateUrl);
+                freeConfig(&cfg);
                 if (curl) curl_easy_cleanup(curl);
                 curl_global_cleanup();
                 return PAM_AUTH_ERR;
@@ -233,14 +318,14 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
         res = pam_prompt(pamh, PAM_PROMPT_ECHO_ON, &resp, "Press Enter to continue:");
 
         int waitingForActivate = 1;
-        sprintf(postData, "device_code=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s", devicecode, CLIENT_ID);
+        sprintf(postData, "device_code=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s", devicecode, cfg.client_id);
         free(devicecode);
 
         while (waitingForActivate) {
                 // sendPAMMessage(pamh, "Waiting for user activation");
 
                 chunk.size = 0;
-                issuePost(TOKEN_URL, postData);
+                issuePost(cfg.token_url, postData);
 
                 pam_syslog(pamh, LOG_DEBUG, "token response (%zu bytes): %s",
                            chunk.size, chunk.memory ? chunk.memory : "(null)");
@@ -272,6 +357,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 			free(name);
 			sendPAMMessage(pamh, prompt_message);
 
+                        freeConfig(&cfg);
                         if (curl) curl_easy_cleanup( curl ) ;
                         curl_global_cleanup();
 
@@ -282,6 +368,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
                 sleep(5);
         }
         /* Curl clean up */
+        freeConfig(&cfg);
         if (curl) curl_easy_cleanup( curl ) ;
         curl_global_cleanup();
 

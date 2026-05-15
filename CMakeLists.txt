@@ -31,3 +31,17 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 
 install(TARGETS ${PROJECT_NAME} DESTINATION /usr/lib/security)
+
+# Install the config file only if one does not already exist, so that
+# a customized /etc/security/pam_authSSHviaOKTA.conf is never overwritten.
+install(CODE "
+    set(dest \"/etc/security/pam_authSSHviaOKTA.conf\")
+    if(NOT EXISTS \"\${dest}\")
+        message(STATUS \"Installing: \${dest}\")
+        file(INSTALL \"${CMAKE_SOURCE_DIR}/config/pam_authSSHviaOKTA.conf\"
+             DESTINATION \"/etc/security\"
+             PERMISSIONS OWNER_READ OWNER_WRITE)
+    else()
+        message(STATUS \"Skipping (already exists): \${dest}\")
+    endif()
+")
