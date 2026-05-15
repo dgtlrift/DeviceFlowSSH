@@ -679,7 +679,7 @@ QRecLevel get_qr_ec_level(const char ec_level)
     }
 }
 
-char * getQR(char * str)
+char * getQR(const char * str)
 {
     int ret = 0;
     int c = 0;

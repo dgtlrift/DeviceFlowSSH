@@ -82,16 +82,42 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
   return realsize;
 }
 
-/* parse JSON output looking for value for a key. Assume string key value, so it parses on \" boundary */
-char * getValueForKey(char * in, const char * key) {
-	char * token = strtok(in, "\"");
-        while ( token != NULL ) {
-        	if (!strcmp(token, key)) {
-                	token = strtok(NULL, "\""); /* skip : */
-                        token = strtok(NULL, "\"");
-			return token;
+/* parse JSON output looking for value for a key. Assume string key value, so it parses on \" boundary.
+   Returns a heap-allocated copy of the value string that the caller must free(), or NULL if not found. */
+char * getValueForKey(const char * in, const char * key) {
+	if (in == NULL || key == NULL) return NULL;
+
+	size_t key_len = strlen(key);
+	const char *p = in;
+
+	while (*p) {
+		/* Advance to the character after the next opening quote */
+		const char *tok_start = strchr(p, '"');
+		if (tok_start == NULL) return NULL;
+		tok_start++;
+
+		const char *tok_end = strchr(tok_start, '"');
+		if (tok_end == NULL) return NULL;
+
+		if ((size_t)(tok_end - tok_start) == key_len &&
+		    memcmp(tok_start, key, key_len) == 0) {
+			/* Key matched — find the opening quote of the value */
+			const char *val_start = strchr(tok_end + 1, '"');
+			if (val_start == NULL) return NULL;
+			val_start++;
+
+			const char *val_end = strchr(val_start, '"');
+			if (val_end == NULL) return NULL;
+
+			size_t val_len = val_end - val_start;
+			char *result = malloc(val_len + 1);
+			if (result == NULL) return NULL;
+			memcpy(result, val_start, val_len);
+			result[val_len] = '\0';
+			return result;
 		}
-		token = strtok(NULL, "\"");
+
+		p = tok_end + 1;
 	}
 	return NULL;
 }
@@ -140,7 +166,7 @@ sendPAMMessage(pam_handle_t *pamh, char * prompt_message) {
 
 
 
-extern char * getQR(char * str);
+extern char * getQR(const char * str);
 
 /* expected hook */
 PAM_EXTERN int pam_sm_setcred( pam_handle_t *pamh, int flags, int argc, const char **argv ) {
@@ -162,33 +188,30 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
         curl_global_init(CURL_GLOBAL_ALL);
         curl = curl_easy_init();
 
-        /* hold temp string */
-        char str1[4096], str2[1024], str3[1024];;
-
         /* call authorize end point */
-	sprintf(postData, "client_id=%s&scope=openid profile offline_access", CLIENT_ID); 
+	sprintf(postData, "client_id=%s&scope=openid profile offline_access", CLIENT_ID);
         issuePost(DEVICE_AUTHORIZE_URL, postData);
 
-	strcpy(str1, chunk.memory);
-        char * usercode = getValueForKey(str1, "user_code");
-	strcpy(str2, chunk.memory);
-        char * devicecode = getValueForKey(str2, "device_code");
-	strcpy(str3, chunk.memory);
-	char * activateUrl = getValueForKey(str3, "verification_uri_complete");
+        char * usercode = getValueForKey(chunk.memory, "user_code");
+        char * devicecode = getValueForKey(chunk.memory, "device_code");
+	char * activateUrl = getValueForKey(chunk.memory, "verification_uri_complete");
         printf("auth: %s %s\n", usercode, devicecode);
+        free(usercode);
 
 	char prompt_message[2000];
         char * qrc = getQR(activateUrl);
   	sprintf(prompt_message, "\n\nPlease login at %s or scan the QRCode below:\n\n%s", activateUrl, qrc );
         free(qrc);
+        free(activateUrl);
         sendPAMMessage(pamh, prompt_message);
 
-	/* work around SSH PAM bug that buffers PAM_TEXT_INFO */ 
+	/* work around SSH PAM bug that buffers PAM_TEXT_INFO */
 	char * resp;
         res = pam_prompt(pamh, PAM_PROMPT_ECHO_ON, &resp, "Press Enter to continue:");
 
         int waitingForActivate = 1;
         sprintf(postData, "device_code=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s", devicecode, CLIENT_ID);
+        free(devicecode);
 
         while (waitingForActivate) {
                 // sendPAMMessage(pamh, "Waiting for user activation");
@@ -196,8 +219,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
                 chunk.size = 0;
                 issuePost(TOKEN_URL, postData);
 
-		strcpy(str1, chunk.memory);
-                char * errormsg = getValueForKey(str1, "error");
+                char * errormsg = getValueForKey(chunk.memory, "error");
                 if (errormsg == NULL) {
 
 			/* Parse response to find id_token, then find payload, then find name claim */
@@ -207,10 +229,13 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 			char * payload = strtok(NULL, ".");
 
 			char * decoded = base64decode(payload, strlen(payload));
+			free(idtoken);
 
 			char * name = getValueForKey(decoded, "name");
+			free(decoded);
 
 			sprintf(prompt_message, "\n\n*********************************\n  Welcome, %s\n*********************************\n\n\n", name);
+			free(name);
 			sendPAMMessage(pamh, prompt_message);
 
                         if (curl) curl_easy_cleanup( curl ) ;
@@ -219,6 +244,7 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
                         return PAM_SUCCESS;
                 }
                 printf("error %s\n", errormsg);
+                free(errormsg);
                 sleep(5);
         }
         /* Curl clean up */
