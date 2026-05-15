@@ -26,6 +26,8 @@ under the License.
 #include <string.h>
 #include <unistd.h>
 
+#include <syslog.h>
+
 #include <curl/curl.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
@@ -192,10 +194,23 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
 	sprintf(postData, "client_id=%s&scope=openid profile offline_access", CLIENT_ID);
         issuePost(DEVICE_AUTHORIZE_URL, postData);
 
+        pam_syslog(pamh, LOG_DEBUG, "authorize response (%zu bytes): %s",
+                   chunk.size, chunk.memory ? chunk.memory : "(null)");
+
         char * usercode = getValueForKey(chunk.memory, "user_code");
         char * devicecode = getValueForKey(chunk.memory, "device_code");
         char * activateUrl = getValueForKey(chunk.memory, "verification_uri_complete");
+
+        pam_syslog(pamh, LOG_DEBUG, "user_code=%s", usercode ? usercode : "(null)");
+        pam_syslog(pamh, LOG_DEBUG, "device_code=%s", devicecode ? devicecode : "(null)");
+        pam_syslog(pamh, LOG_DEBUG, "verification_uri_complete=%s", activateUrl ? activateUrl : "(null)");
+
         if (usercode == NULL || devicecode == NULL || activateUrl == NULL) {
+                pam_syslog(pamh, LOG_ERR,
+                           "authorize response missing expected key(s): user_code=%s device_code=%s verification_uri_complete=%s",
+                           usercode ? "ok" : "NULL",
+                           devicecode ? "ok" : "NULL",
+                           activateUrl ? "ok" : "NULL");
                 free(usercode);
                 free(devicecode);
                 free(activateUrl);
@@ -227,19 +242,30 @@ PAM_EXTERN int pam_sm_authenticate( pam_handle_t *pamh, int flags,int argc, cons
                 chunk.size = 0;
                 issuePost(TOKEN_URL, postData);
 
+                pam_syslog(pamh, LOG_DEBUG, "token response (%zu bytes): %s",
+                           chunk.size, chunk.memory ? chunk.memory : "(null)");
+
                 char * errormsg = getValueForKey(chunk.memory, "error");
+                pam_syslog(pamh, LOG_DEBUG, "token error field: %s",
+                           errormsg ? errormsg : "(null — proceeding to token parse)");
+
                 if (errormsg == NULL) {
 
 			/* Parse response to find id_token, then find payload, then find name claim */
 			char * idtoken = getValueForKey(chunk.memory, "id_token");
+                        pam_syslog(pamh, LOG_DEBUG, "id_token: %s",
+                                   idtoken ? "(present)" : "(null)");
 
 			char * header = strtok(idtoken, ".");
 			char * payload = strtok(NULL, ".");
 
 			char * decoded = base64decode(payload, strlen(payload));
+                        pam_syslog(pamh, LOG_DEBUG, "decoded JWT payload: %s",
+                                   decoded ? decoded : "(null)");
 			free(idtoken);
 
 			char * name = getValueForKey(decoded, "name");
+                        pam_syslog(pamh, LOG_DEBUG, "name claim: %s", name ? name : "(null)");
 			free(decoded);
 
 			sprintf(prompt_message, "\n\n*********************************\n  Welcome, %s\n*********************************\n\n\n", name);
